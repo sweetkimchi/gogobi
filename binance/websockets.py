@@ -1,12 +1,11 @@
 # coding=utf-8
 
 import json
-import threading
 
 from autobahn.twisted.websocket import WebSocketClientFactory, \
     WebSocketClientProtocol, \
     connectWS
-from twisted.internet import reactor, ssl
+from twisted.internet import ssl
 from twisted.internet.protocol import ReconnectingClientFactory
 from twisted.internet.error import ReactorAlreadyRunning
 
@@ -58,7 +57,7 @@ class BinanceClientFactory(WebSocketClientFactory, BinanceReconnectingClientFact
             self.callback(self._reconnect_error_payload)
 
 
-class BinanceSocketManager(threading.Thread):
+class BinanceSocketManager(object):
 
     STREAM_URL = 'wss://stream.binance.com:9443/'
 
@@ -68,19 +67,25 @@ class BinanceSocketManager(threading.Thread):
 
     _user_timeout = 30 * 60  # 30 minutes
 
-    def __init__(self, client):
+    def __init__(self, client, reactor=None):
         """Initialise the BinanceSocketManager
 
         :param client: Binance API client
         :type client: binance.Client
 
         """
-        threading.Thread.__init__(self)
         self._conns = {}
         self._user_timer = None
         self._user_listen_key = None
         self._user_callback = None
         self._client = client
+
+        if not reactor:
+            from twisted.internet import reactor
+            self._reactor = reactor
+
+    def start(self):
+        self.run()
 
     def _start_socket(self, path, callback, prefix='ws/'):
         if path in self._conns:
@@ -435,13 +440,21 @@ class BinanceSocketManager(threading.Thread):
 
         Message Format - see Binance API docs for all types
         """
+        # Get the user listen key
+        user_listen_key = self._client.stream_get_listen_key()
+        # and start the socket with this specific key
+        conn_key = self._start_user_socket(user_listen_key, callback)
+        return conn_key
+
+    def _start_user_socket(self, user_listen_key, callback):
+        # With this function we can start a user socket with a specific key
         if self._user_listen_key:
             # cleanup any sockets with this key
             for conn_key in self._conns:
                 if len(conn_key) >= 60 and conn_key[:60] == self._user_listen_key:
                     self.stop_socket(conn_key)
                     break
-        self._user_listen_key = self._client.stream_get_listen_key()
+        self._user_listen_key = user_listen_key
         self._user_callback = callback
         conn_key = self._start_socket(self._user_listen_key, callback)
         if conn_key:
@@ -451,16 +464,19 @@ class BinanceSocketManager(threading.Thread):
         return conn_key
 
     def _start_user_timer(self):
-        self._user_timer = threading.Timer(self._user_timeout, self._keepalive_user_socket)
-        self._user_timer.setDaemon(True)
-        self._user_timer.start()
+        task.deferLater(self._reactor, self._user_timeout, self._keepalive_user_socket)
 
     def _keepalive_user_socket(self):
-        listen_key = self._client.stream_get_listen_key()
+        user_listen_key = self._client.stream_get_listen_key()
         # check if they key changed and
-        if listen_key != self._user_listen_key:
-            self.start_user_socket(self._user_callback)
-        self._start_user_timer()
+        if user_listen_key != self._user_listen_key:
+            # Start a new socket with the key received
+            # `_start_user_socket` automatically cleanup open sockets
+            # and starts timer to keep socket alive
+            self._start_user_socket(user_listen_key, self._user_callback)
+        else:
+            # Restart timer only if the user listen key is not changed
+            self._start_user_timer()
 
     def stop_socket(self, conn_key):
         """Stop a websocket given the connection key
@@ -494,7 +510,7 @@ class BinanceSocketManager(threading.Thread):
 
     def run(self):
         try:
-            reactor.run(installSignalHandlers=False)
+            self._reactor.run()
         except ReactorAlreadyRunning:
             # Ignore error about reactor already running
             pass

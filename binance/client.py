@@ -2,9 +2,13 @@
 
 import hashlib
 import hmac
-import requests
 import time
 from operator import itemgetter
+
+import requests
+import treq
+from twisted.internet.defer import returnValue, inlineCallbacks
+
 from .helpers import date_to_milliseconds, interval_to_milliseconds
 from .exceptions import BinanceAPIException, BinanceRequestException, BinanceWithdrawException
 
@@ -87,19 +91,17 @@ class Client(object):
 
         self.API_KEY = api_key
         self.API_SECRET = api_secret
-        self.session = self._init_session()
         self._requests_params = requests_params
 
         # init DNS and SSL cert
         self.ping()
 
-    def _init_session(self):
-
-        session = requests.session()
-        session.headers.update({'Accept': 'application/json',
-                                'User-Agent': 'binance/python',
-                                'X-MBX-APIKEY': self.API_KEY})
-        return session
+    def _make_headers(self):
+        return {
+            'Accept': 'application/json',
+            'User-Agent': 'binance/python',
+            'X-MBX-APIKEY': self.API_KEY,
+        }
 
     def _create_api_uri(self, path, signed=True, version=PUBLIC_API_VERSION):
         v = self.PRIVATE_API_VERSION if signed else version
@@ -138,6 +140,7 @@ class Client(object):
             params.append(('signature', data['signature']))
         return params
 
+    @inlineCallbacks
     def _request(self, method, uri, signed, force_params=False, **kwargs):
 
         # set default requests timeout
@@ -171,8 +174,11 @@ class Client(object):
             kwargs['params'] = kwargs['data']
             del(kwargs['data'])
 
-        response = getattr(self.session, method)(uri, **kwargs)
-        return self._handle_response(response)
+        kwargs['headers'] = self._make_headers()
+        response = yield treq.request(method=method, url=uri, **kwargs)
+        # response = getattr(self.session, method)(uri, **kwargs)
+        output = yield self._handle_response(response)
+        returnValue(output)
 
     def _request_api(self, method, path, signed=False, version=PUBLIC_API_VERSION, **kwargs):
         uri = self._create_api_uri(path, signed, version)
@@ -190,15 +196,17 @@ class Client(object):
 
         return self._request(method, uri, signed, **kwargs)
 
+    @inlineCallbacks
     def _handle_response(self, response):
         """Internal helper for handling API responses from the Binance server.
         Raises the appropriate exceptions when necessary; otherwise, returns the
         response.
         """
-        if not str(response.status_code).startswith('2'):
+        if not str(response.code).startswith('2'):
             raise BinanceAPIException(response)
         try:
-            return response.json()
+            result = yield response.json()
+            returnValue(result)
         except ValueError:
             raise BinanceRequestException('Invalid Response: %s' % response.text)
 
@@ -575,6 +583,7 @@ class Client(object):
         """
         return self._get('aggTrades', data=params)
 
+    @inlineCallbacks
     def aggregate_trade_iter(self, symbol, start_str=None, last_id=None):
         """Iterate over aggregate trade data from (start_time or last_id) to
         the end of the history so far.
@@ -615,13 +624,13 @@ class Client(object):
             # Without a last_id, we actually need the first trade.  Normally,
             # we'd get rid of it. See the next loop.
             if start_str is None:
-                trades = self.get_aggregate_trades(symbol=symbol, fromId=0)
+                trades = yield self.get_aggregate_trades(symbol=symbol, fromId=0)
             else:
                 # It doesn't matter what the end time is, as long as it's less
                 # than a day and the result set contains at least one trade.
                 # A half a day should be fine.
                 start_ts = date_to_milliseconds(start_str)
-                trades = self.get_aggregate_trades(
+                trades = yield self.get_aggregate_trades(
                     symbol=symbol,
                     startTime=start_ts,
                     endTime=start_ts + (1000 * 86400 / 2))
@@ -631,12 +640,12 @@ class Client(object):
 
         while True:
             # There is no need to wait between queries, to avoid hitting the
-            # rate limit. We're using blocking IO, and as long as we're the
-            # only thread running calls like this, Binance will automatically
+            # rate limit. We're using inlinecallbacks to simulate blocking IO.
+            # Running calls like this, Binance will automatically
             # add the right delay time on their end, forcing us to wait for
             # data. That really simplifies this function's job. Binance is
             # fucking awesome.
-            trades = self.get_aggregate_trades(symbol=symbol, fromId=last_id)
+            trades = yield self.get_aggregate_trades(symbol=symbol, fromId=last_id)
             # fromId=n returns a set starting with id n, but we already have
             # that one. So get rid of the first item in the result set.
             trades = trades[1:]

@@ -3,8 +3,11 @@ import dateparser
 import pytz
 import json
 
+
 from datetime import datetime
 from binance.client import Client
+from twisted.internet import task
+from twisted.internet.defer import inlineCallbacks, returnValue
 
 
 def date_to_milliseconds(date_str):
@@ -57,6 +60,7 @@ def interval_to_milliseconds(interval):
     return ms
 
 
+@inlineCallbacks
 def get_historical_klines(symbol, interval, start_str, end_str=None):
     """Get Historical Klines from Binance
 
@@ -101,7 +105,7 @@ def get_historical_klines(symbol, interval, start_str, end_str=None):
     symbol_existed = False
     while True:
         # fetch the klines from start_ts up to max 500 entries or the end_ts if set
-        temp_data = client.get_klines(
+        temp_data = yield client.get_klines(
             symbol=symbol,
             interval=interval,
             limit=limit,
@@ -131,9 +135,9 @@ def get_historical_klines(symbol, interval, start_str, end_str=None):
 
         # sleep after every 3rd call to be kind to the API
         if idx % 3 == 0:
-            time.sleep(1)
+            yield task.deferLater(reactor, 1)
 
-    return output_data
+    returnValue(output_data)
 
 
 symbol = "ETHBTC"
@@ -141,16 +145,19 @@ start = "1 Dec, 2017"
 end = "1 Jan, 2018"
 interval = Client.KLINE_INTERVAL_30MINUTE
 
-klines = get_historical_klines(symbol, interval, start, end)
 
-# open a file with filename including symbol, interval and start and end converted to milliseconds
-with open(
-    "Binance_{}_{}_{}-{}.json".format(
-        symbol,
-        interval,
-        date_to_milliseconds(start),
-        date_to_milliseconds(end)
-    ),
-    'w'  # set file write mode
-) as f:
-    f.write(json.dumps(klines))
+@inlineCallbacks
+def run():
+    klines = yield get_historical_klines(symbol, interval, start, end)
+
+    # open a file with filename including symbol, interval and start and end converted to milliseconds
+    with open(
+        "Binance_{}_{}_{}-{}.json".format(
+            symbol,
+            interval,
+            date_to_milliseconds(start),
+            date_to_milliseconds(end)
+        ),
+        'w'  # set file write mode
+    ) as f:
+        f.write(json.dumps(klines))
